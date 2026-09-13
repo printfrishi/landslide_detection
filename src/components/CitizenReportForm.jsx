@@ -16,10 +16,11 @@ const inputClasses =
   'mt-1.5 block w-full rounded-md border border-input bg-white px-3 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:cursor-not-allowed disabled:bg-secondary-100 disabled:text-secondary-500';
 
 /**
- * Citizen landslide report form with live camera capture, auto-detected
- * location (GPS + reverse geocoding) and a typed reporter name — sign-in is
- * optional and only used to pre-fill. Builds multipart FormData (photo blob
- * + fields) and POSTs it to /api/citizen-reports.
+ * Citizen landslide report form. The camera stays OFF until the citizen
+ * clicks the capture button — it opens, grabs a frame, and is released
+ * immediately. Location (GPS + reverse geocoding) is auto-detected and the
+ * reporter name is typed (sign-in only pre-fills). Builds multipart FormData
+ * (photo blob + fields) and POSTs it to /api/citizen-reports.
  */
 export default function CitizenReportForm() {
   const videoRef = useRef(null);
@@ -34,8 +35,8 @@ export default function CitizenReportForm() {
   /* location (auto-detected) */
   const [location, setLocation] = useState({ lat: null, lon: null, address: '', loading: true, error: null });
 
-  /* camera */
-  const [cameraState, setCameraState] = useState('starting'); // starting | live | error
+  /* camera: off | starting | live | error — never on by default */
+  const [cameraState, setCameraState] = useState('off');
   const [cameraError, setCameraError] = useState('');
 
   /* captured photo */
@@ -107,16 +108,23 @@ export default function CitizenReportForm() {
     return undefined;
   }, []);
 
-  /* stop camera tracks on unmount */
+  /* release the camera whenever the form unmounts */
   useEffect(
     () => () => {
       streamRef.current?.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
       if (photoRef.current) URL.revokeObjectURL(photoRef.current);
     },
     []
   );
 
-  /* start the live camera feed (rear camera when available) */
+  const stopCamera = useCallback(() => {
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    setCameraState('off');
+  }, []);
+
+  /* opened only on demand: starts the camera feed */
   const startCamera = useCallback(() => {
     setCameraState('starting');
     setCameraError('');
@@ -142,11 +150,6 @@ export default function CitizenReportForm() {
         );
       });
   }, []);
-
-  useEffect(() => {
-    startCamera();
-    return () => streamRef.current?.getTracks().forEach((track) => track.stop());
-  }, [startCamera]);
 
   /* attach the stream AFTER the <video> element has mounted */
   useEffect(() => {
@@ -183,9 +186,17 @@ export default function CitizenReportForm() {
     });
   };
 
-  const handleCapture = async () => {
-    const blob = await captureFrame();
-    if (!blob) setSubmitError('Could not capture a frame — is the camera feed running?');
+  /** Button action: opens the camera when off; captures + releases when live. */
+  const handleCameraButton = async () => {
+    if (cameraState === 'live') {
+      const blob = await captureFrame();
+      stopCamera();
+      if (!blob) setSubmitError('Could not capture a frame — is the camera feed running?');
+      return;
+    }
+    if (cameraState === 'off' || cameraState === 'error') {
+      startCamera();
+    }
   };
 
   const handleSubmit = async (event) => {
@@ -205,8 +216,12 @@ export default function CitizenReportForm() {
     setSubmitError(null);
 
     try {
-      // A fresh frame is captured on submit; fall back to the previewed one.
-      let blob = await captureFrame();
+      // If the camera happens to be open, grab a fresh frame and release it.
+      let blob = null;
+      if (cameraState === 'live') {
+        blob = await captureFrame();
+        stopCamera();
+      }
       if (!blob) blob = photo?.blob ?? null;
 
       const formData = new FormData();
@@ -237,6 +252,15 @@ export default function CitizenReportForm() {
       ? `${location.lat.toFixed(5)}, ${location.lon.toFixed(5)}${location.address ? ` — ${location.address}` : ''}`
       : null;
 
+  const buttonLabel =
+    cameraState === 'starting'
+      ? 'Starting camera…'
+      : cameraState === 'live'
+        ? 'Capture photo'
+        : photo
+          ? 'Retake photo'
+          : 'Open camera & capture';
+
   /* ---------------- success state ---------------- */
   if (successRef) {
     return (
@@ -266,18 +290,19 @@ export default function CitizenReportForm() {
     <form onSubmit={handleSubmit} noValidate className="rounded-xl border bg-white p-6 shadow-sm">
       {/* instructions */}
       <p className="rounded-md border border-sky-200 bg-sky-50 px-4 py-2.5 text-sm text-sky-900">
-        📸 Live photo capture only — no upload feature. 📍 Location will be auto-detected.
+        📸 Live photo capture only — no upload feature. 📍 Location will be auto-detected. The
+        camera opens only when you tap the capture button.
       </p>
 
       <div className="mt-5 grid gap-5 lg:grid-cols-2">
-        {/* live camera feed */}
+        {/* camera area */}
         <div>
           <p className="mb-1.5 flex items-center gap-1.5 text-sm font-medium text-secondary-700">
             <Camera className="h-4 w-4" aria-hidden="true" />
-            Live camera
+            Photo (live capture)
           </p>
           <div className="relative aspect-video w-full overflow-hidden rounded-lg border bg-secondary-900">
-            {/* the video element stays mounted so the stream can attach */}
+            {/* the video element stays mounted so a stream can attach on demand */}
             <video
               ref={videoRef}
               autoPlay
@@ -286,43 +311,74 @@ export default function CitizenReportForm() {
               className={cameraState === 'live' ? 'h-full w-full object-cover' : 'hidden'}
               aria-label="Live camera feed"
             />
-            {cameraState !== 'live' && (
-              <div className="absolute inset-0 flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-white/80">
+
+            {cameraState === 'off' && photo && (
+              <img
+                src={photo.url}
+                alt="Captured report photo"
+                className="h-full w-full object-cover"
+              />
+            )}
+
+            {cameraState === 'off' && !photo && (
+              <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-white/70">
                 <CameraOff className="h-7 w-7" aria-hidden="true" />
                 <p className="text-xs leading-5">
-                  {cameraState === 'starting' ? 'Starting camera… allow access if prompted.' : cameraError}
+                  Camera is off. Tap “{buttonLabel}” below to open it and capture.
                 </p>
-                {cameraState === 'error' && (
-                  <button
-                    type="button"
-                    onClick={startCamera}
-                    className="rounded-md border border-white/40 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
-                  >
-                    Try again
-                  </button>
-                )}
               </div>
             )}
+
+            {cameraState === 'starting' && (
+              <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-white/80">
+                <Loader2 className="h-7 w-7 animate-spin" aria-hidden="true" />
+                <p className="text-xs leading-5">Starting camera… allow access if prompted.</p>
+              </div>
+            )}
+
+            {cameraState === 'error' && (
+              <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-white/80">
+                <CameraOff className="h-7 w-7" aria-hidden="true" />
+                <p className="text-xs leading-5">{cameraError}</p>
+                <button
+                  type="button"
+                  onClick={startCamera}
+                  className="rounded-md border border-white/40 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white"
+                >
+                  Try again
+                </button>
+              </div>
+            )}
+
             {cameraState === 'live' && (
               <span className="absolute left-2.5 top-2.5 inline-flex items-center gap-1.5 rounded-full bg-black/55 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-white">
                 <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-red-500" aria-hidden="true" />
-                Live
+                Live — tap capture
+              </span>
+            )}
+
+            {cameraState === 'off' && photo && (
+              <span className="absolute left-2.5 top-2.5 inline-flex items-center gap-1.5 rounded-full bg-emerald-600 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-white">
+                <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+                Photo captured
               </span>
             )}
           </div>
+
           <Button
             type="button"
-            onClick={handleCapture}
-            disabled={cameraState !== 'live'}
+            onClick={handleCameraButton}
+            disabled={cameraState === 'starting'}
             className="mt-3 w-full"
           >
-            <Camera className="h-4 w-4" aria-hidden="true" />
-            Capture photo
+            {cameraState === 'starting' && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+            {cameraState === 'live' && <Camera className="h-4 w-4" aria-hidden="true" />}
+            {buttonLabel}
           </Button>
-          {photo && (
+          {photo && cameraState === 'off' && (
             <p className="mt-2 flex items-center gap-1.5 text-xs text-emerald-700" role="status">
               <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
-              Photo captured — it will be attached to this report.
+              Photo ready — it will be attached to this report.
             </p>
           )}
         </div>
@@ -459,7 +515,8 @@ export default function CitizenReportForm() {
 
       <div className="mt-5 flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center">
         <p className="text-xs text-secondary-400">
-          Photo and GPS coordinates are attached automatically with every report.
+          The camera opens only when you tap the capture button, and the photo + GPS coordinates are
+          attached automatically.
         </p>
         <Button type="submit" loading={submitting}>
           <Send aria-hidden="true" />
