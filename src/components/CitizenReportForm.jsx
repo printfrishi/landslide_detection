@@ -6,7 +6,6 @@ import {
   Loader2,
   MapPin,
   Send,
-  User,
 } from 'lucide-react';
 import authService from '../services/authService';
 import { submitCitizenReport } from '../services/api';
@@ -18,17 +17,19 @@ const inputClasses =
 
 /**
  * Citizen landslide report form with live camera capture, auto-detected
- * location (GPS + reverse geocoding) and auto-filled reporter identity.
- * Builds multipart FormData (photo blob + fields) and POSTs it to
- * /api/citizen-reports through the API service.
+ * location (GPS + reverse geocoding) and a typed reporter name — sign-in is
+ * optional and only used to pre-fill. Builds multipart FormData (photo blob
+ * + fields) and POSTs it to /api/citizen-reports.
  */
 export default function CitizenReportForm() {
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const photoRef = useRef(null);
 
-  /* reporter identity (auto-filled) */
-  const [profile, setProfile] = useState({ name: '', mobile: '', loaded: false });
+  /* reporter identity — typed by the citizen; sign-in only pre-fills */
+  const [reporterName, setReporterName] = useState('');
+  const [reporterMobile, setReporterMobile] = useState('');
+  const [prefillLoaded, setPrefillLoaded] = useState(false);
 
   /* location (auto-detected) */
   const [location, setLocation] = useState({ lat: null, lon: null, address: '', loading: true, error: null });
@@ -44,22 +45,24 @@ export default function CitizenReportForm() {
   const [hazardType, setHazardType] = useState('Landslide');
   const [district, setDistrict] = useState('Tehri Garhwal');
   const [description, setDescription] = useState('');
+  const [nameError, setNameError] = useState(null);
   const [descriptionError, setDescriptionError] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState(null);
   const [successRef, setSuccessRef] = useState(null);
 
-  /* auto-fill reporter identity */
+  /* optional pre-fill from a signed-in session */
   useEffect(() => {
     let active = true;
     authService
       .getUserProfile()
       .then((profile) => {
-        if (active && profile) setProfile({ ...profile, loaded: true });
-        else if (active) setProfile((current) => ({ ...current, loaded: true }));
+        if (!active || !profile) return;
+        setReporterName((current) => current || profile.name || '');
+        setReporterMobile((current) => current || profile.mobile || '');
       })
-      .catch(() => {
-        if (active) setProfile((current) => ({ ...current, loaded: true }));
+      .finally(() => {
+        if (active) setPrefillLoaded(true);
       });
     return () => {
       active = false;
@@ -72,7 +75,7 @@ export default function CitizenReportForm() {
       setLocation((current) => ({ ...current, loading: false, error: 'Geolocation is not supported by this browser.' }));
       return undefined;
     }
-    const watcher = navigator.geolocation.getCurrentPosition(
+    navigator.geolocation.getCurrentPosition(
       (position) => {
         const { latitude, longitude } = position.coords;
         setLocation((current) => ({ ...current, lat: latitude, lon: longitude, loading: false }));
@@ -85,12 +88,9 @@ export default function CitizenReportForm() {
             setLocation((current) => ({
               ...current,
               address: data?.display_name ?? '',
-              loading: false,
             }));
           })
-          .catch(() => {
-            setLocation((current) => ({ ...current, loading: false }));
-          });
+          .catch(() => {});
       },
       (error) => {
         setLocation((current) => ({
@@ -104,7 +104,7 @@ export default function CitizenReportForm() {
       },
       { enableHighAccuracy: true, timeout: 12000 }
     );
-    return () => navigator.geolocation.clearWatch(watcher);
+    return undefined;
   }, []);
 
   /* stop camera tracks on unmount */
@@ -129,10 +129,7 @@ export default function CitizenReportForm() {
       .getUserMedia({ video: { facingMode: 'environment' }, audio: false })
       .then((stream) => {
         streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          setCameraState('live');
-        }
+        setCameraState('live'); // the attach effect below wires the stream to the <video>
       })
       .catch((error) => {
         setCameraState('error');
@@ -150,6 +147,14 @@ export default function CitizenReportForm() {
     startCamera();
     return () => streamRef.current?.getTracks().forEach((track) => track.stop());
   }, [startCamera]);
+
+  /* attach the stream AFTER the <video> element has mounted */
+  useEffect(() => {
+    const video = videoRef.current;
+    if (cameraState === 'live' && video && streamRef.current && video.srcObject !== streamRef.current) {
+      video.srcObject = streamRef.current;
+    }
+  }, [cameraState]);
 
   /** Draws the current video frame onto a canvas and stores it as a JPEG blob. */
   const captureFrame = () => {
@@ -185,11 +190,17 @@ export default function CitizenReportForm() {
 
   const handleSubmit = async (event) => {
     event.preventDefault();
-    if (!description.trim() || description.trim().length < 10) {
-      setDescriptionError('Please describe the hazard in at least 10 characters.');
-      return;
-    }
-    setDescriptionError(null);
+    const nextErrors = {
+      name: reporterName.trim().length >= 2 ? null : 'Please enter your name.',
+      description:
+        description.trim().length >= 10
+          ? null
+          : 'Please describe the hazard in at least 10 characters.',
+    };
+    setNameError(nextErrors.name);
+    setDescriptionError(nextErrors.description);
+    if (nextErrors.name || nextErrors.description) return;
+
     setSubmitting(true);
     setSubmitError(null);
 
@@ -202,8 +213,8 @@ export default function CitizenReportForm() {
       if (blob) formData.append('photo', blob, 'report-photo.jpg');
       formData.append('hazardType', hazardType);
       formData.append('district', district);
-      formData.append('reporterName', profile.name);
-      formData.append('reporterMobile', profile.mobile);
+      formData.append('reporterName', reporterName.trim());
+      formData.append('reporterMobile', reporterMobile.trim());
       formData.append('location', location.address || (location.lat !== null ? `${location.lat}, ${location.lon}` : ''));
       if (location.lat !== null) {
         formData.append('latitude', String(location.lat));
@@ -266,21 +277,20 @@ export default function CitizenReportForm() {
             Live camera
           </p>
           <div className="relative aspect-video w-full overflow-hidden rounded-lg border bg-secondary-900">
-            {cameraState === 'live' && (
-              <video
-                ref={videoRef}
-                autoPlay
-                muted
-                playsInline
-                className="h-full w-full object-cover"
-                aria-label="Live camera feed"
-              />
-            )}
+            {/* the video element stays mounted so the stream can attach */}
+            <video
+              ref={videoRef}
+              autoPlay
+              muted
+              playsInline
+              className={cameraState === 'live' ? 'h-full w-full object-cover' : 'hidden'}
+              aria-label="Live camera feed"
+            />
             {cameraState !== 'live' && (
-              <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-white/80">
+              <div className="absolute inset-0 flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-white/80">
                 <CameraOff className="h-7 w-7" aria-hidden="true" />
                 <p className="text-xs leading-5">
-                  {cameraState === 'starting' ? 'Starting camera…' : cameraError}
+                  {cameraState === 'starting' ? 'Starting camera… allow access if prompted.' : cameraError}
                 </p>
                 {cameraState === 'error' && (
                   <button
@@ -300,15 +310,15 @@ export default function CitizenReportForm() {
               </span>
             )}
           </div>
-          <button
+          <Button
             type="button"
             onClick={handleCapture}
             disabled={cameraState !== 'live'}
-            className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-md bg-[#0a2f5a] px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-[#134b8a] disabled:cursor-not-allowed disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            className="mt-3 w-full"
           >
             <Camera className="h-4 w-4" aria-hidden="true" />
             Capture photo
-          </button>
+          </Button>
           {photo && (
             <p className="mt-2 flex items-center gap-1.5 text-xs text-emerald-700" role="status">
               <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
@@ -317,31 +327,44 @@ export default function CitizenReportForm() {
           )}
         </div>
 
-        {/* auto-filled identity + location */}
+        {/* reporter identity (typed) + auto-detected location */}
         <div className="space-y-4">
           <div>
-            <p className="mb-1.5 flex items-center gap-1.5 text-sm font-medium text-secondary-700">
-              <User className="h-4 w-4" aria-hidden="true" />
-              Reporter (auto-filled)
-            </p>
+            <label htmlFor="cr-name" className="mb-1.5 block text-sm font-medium text-secondary-700">
+              Your name <span className="text-red-600">*</span>
+            </label>
             <input
-              aria-label="Reporter name"
-              value={profile.name || (profile.loaded ? 'Not signed in' : 'Loading…')}
-              disabled
-              className={inputClasses}
+              id="cr-name"
+              type="text"
+              required
+              value={reporterName}
+              onChange={(event) => {
+                setReporterName(event.target.value);
+                setNameError(null);
+              }}
+              placeholder="Type your full name"
+              aria-invalid={nameError ? true : undefined}
+              className={`block h-10 w-full rounded-md border bg-white px-3 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-ring ${
+                nameError ? 'border-destructive' : 'border-input'
+              }`}
             />
+            {nameError && <p className="mt-1.5 text-sm text-destructive">{nameError}</p>}
             <input
-              aria-label="Reporter mobile number"
-              value={profile.mobile || (profile.loaded ? '—' : 'Loading…')}
-              disabled
-              placeholder="Mobile"
-              className={`mt-2 ${inputClasses}`}
+              aria-label="Reporter mobile number (optional)"
+              type="tel"
+              value={reporterMobile}
+              onChange={(event) => setReporterMobile(event.target.value)}
+              placeholder="Mobile number (optional)"
+              className="mt-3 block h-10 w-full rounded-md border border-input bg-white px-3 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
             />
-            {!profile.loaded && (
+            {!prefillLoaded && (
               <p className="mt-1 flex items-center gap-1.5 text-xs text-secondary-400">
                 <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
-                Reading your session…
+                Checking for a saved profile…
               </p>
+            )}
+            {prefillLoaded && reporterName && (
+              <p className="mt-1 text-xs text-secondary-400">Pre-filled from your signed-in session where available.</p>
             )}
           </div>
 
@@ -438,7 +461,7 @@ export default function CitizenReportForm() {
         <p className="text-xs text-secondary-400">
           Photo and GPS coordinates are attached automatically with every report.
         </p>
-        <Button type="submit" loading={submitting} disabled={cameraState !== 'live' && !photo}>
+        <Button type="submit" loading={submitting}>
           <Send aria-hidden="true" />
           Submit Report
         </Button>
