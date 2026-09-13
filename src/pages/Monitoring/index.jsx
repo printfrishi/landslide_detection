@@ -14,6 +14,7 @@ import useDebounce from '../../hooks/useDebounce';
 import sensorService from '../../services/sensorService';
 import SensorCard from '../../components/features/monitoring/SensorCard';
 import TelemetryChart from '../../components/features/monitoring/TelemetryChart';
+import StationApiExplorer from '../../components/features/monitoring/StationApiExplorer';
 import { TELEMETRY, sensorTrend } from '../../components/features/monitoring/telemetryData';
 import { Input } from '../../components/ui/Input';
 import { SelectField } from '../../components/ui/Select';
@@ -106,6 +107,20 @@ export default function Monitoring() {
           {TELEMETRY.map((metric) => (
             <TelemetryChart key={metric.key} {...metric} />
           ))}
+        </div>
+      </section>
+
+      {/* Live-API explorer — real backend endpoints, not the mock layer */}
+      <section aria-labelledby="live-api-heading" className="mt-12">
+        <h2 id="live-api-heading" className="text-lg font-bold text-[#0a2f5a]">
+          Station data explorer
+        </h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Pulls live station readings straight from the API — populate the dropdowns and inspect the
+          raw response.
+        </p>
+        <div className="mt-4">
+          <StationApiExplorer />
         </div>
       </section>
 

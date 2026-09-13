@@ -25,13 +25,14 @@ function getAuthHeaders() {
 }
 
 /**
- * Fetch wrapper for the future real backend. Mock services do not use it yet,
- * but swapping them over must not require any component changes.
+ * Fetch wrapper. Relative paths hit VITE_API_BASE_URL; absolute URLs (used by
+ * the hosted node API via the /nodes-api proxy) pass through unchanged.
  */
 export async function apiFetch(path, { method = 'GET', body, headers = {}, ...options } = {}) {
+  const url = path.startsWith('http') ? path : `${API_BASE_URL}${path}`;
   let response;
   try {
-    response = await fetch(`${API_BASE_URL}${path}`, {
+    response = await fetch(url, {
       method,
       headers: { 'Content-Type': 'application/json', ...getAuthHeaders(), ...headers },
       body: body !== undefined ? JSON.stringify(body) : undefined,
@@ -54,6 +55,54 @@ export async function apiFetch(path, { method = 'GET', body, headers = {}, ...op
     );
   }
   return payload;
+}
+
+/* ------------------------------------------------------------------ */
+/* Station API — first endpoints migrated off the mock layer.           */
+/* ------------------------------------------------------------------ */
+
+/** GET ${VITE_API_BASE_URL}/stations — list all monitoring stations. */
+export async function getStations() {
+  return apiFetch('/stations');
+}
+
+/**
+ * GET ${VITE_API_BASE_URL}/stations/:stationId/data
+ * Optional `dataType` ('realtime' | 'history') is sent as ?type=.
+ */
+export async function getStationData(stationId, dataType) {
+  const query = dataType ? `?type=${encodeURIComponent(dataType)}` : '';
+  return apiFetch(`/stations/${encodeURIComponent(stationId)}/data${query}`);
+}
+
+/* ------------------------------------------------------------------ */
+/* Nodes API — hosted landslide early-warning backend.                  */
+/* Browser calls are proxied same-origin through /nodes-api (see        */
+/* vite.config.js) because the backend does not send CORS headers yet.  */
+/* ------------------------------------------------------------------ */
+
+const NODES_API_BASE_URL = '/nodes-api';
+
+/** GET /nodes/getAllNodes — returns an array of node objects. */
+export async function getNodes() {
+  return apiFetch(`${NODES_API_BASE_URL}/nodes/getAllNodes`);
+}
+
+/** GET /nodes/getbyName/:name — full telemetry for one node. */
+export async function getNodeByName(name) {
+  return apiFetch(`${NODES_API_BASE_URL}/nodes/getbyName/${encodeURIComponent(name)}`);
+}
+
+/** POST /nodes/addNode — register a new node. */
+export async function addNode(data) {
+  return apiFetch(`${NODES_API_BASE_URL}/nodes/addNode`, { method: 'POST', body: data });
+}
+
+/** DELETE /nodes/deleteNode/:id — remove a node by id. */
+export async function deleteNode(id) {
+  return apiFetch(`${NODES_API_BASE_URL}/nodes/deleteNode/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  });
 }
 
 export { API_BASE_URL, USE_MOCKS };
