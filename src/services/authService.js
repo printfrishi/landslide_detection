@@ -69,6 +69,22 @@ const authService = {
     await simulateDelay();
     return true;
   },
+
+  /**
+   * Auto-fill data for citizen reports: resolves the signed-in user from the
+   * mock session token and reads any locally stored mobile number. Returns
+   * null when nobody is signed in.
+   */
+  async getUserProfile() {
+    const token = localStorage.getItem(TOKEN_KEY);
+    const user = token ? decodeToken(token) : null;
+    if (!user) return null;
+    return {
+      name: user.name ?? '',
+      email: user.email ?? '',
+      mobile: localStorage.getItem('hr_mobile') ?? '',
+    };
+  },
 };
 
 export default authService;

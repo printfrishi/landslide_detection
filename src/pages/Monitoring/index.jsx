@@ -1,21 +1,22 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDownRight,
   ArrowRight,
   ArrowUpRight,
   LayoutGrid,
   Minus,
+  RefreshCw,
   Search,
   SearchX,
   Table2,
 } from 'lucide-react';
 import useFetch from '../../hooks/useFetch';
 import useDebounce from '../../hooks/useDebounce';
+import { getNodeByName, getNodes } from '../../services/api';
 import sensorService from '../../services/sensorService';
 import SensorCard from '../../components/features/monitoring/SensorCard';
 import TelemetryChart from '../../components/features/monitoring/TelemetryChart';
-import StationApiExplorer from '../../components/features/monitoring/StationApiExplorer';
-import { TELEMETRY, sensorTrend } from '../../components/features/monitoring/telemetryData';
+import { LIVE_METRICS, sensorTrend, toNodeNames } from '../../components/features/monitoring/telemetryData';
 import { Input } from '../../components/ui/Input';
 import { SelectField } from '../../components/ui/Select';
 import { Button } from '../../components/ui/Button';
@@ -24,10 +25,8 @@ import { Card, CardContent } from '../../components/ui/Card';
 import EmptyState from '../../components/ui/EmptyState';
 import ErrorMessage from '../../components/ui/ErrorMessage';
 import { Badge } from '../../components/ui/Badge';
-import {
-  RISK_LEVELS,
-  riskLevelLabel,
-} from '../../constants/riskLevels';
+import Spinner from '../../components/ui/Spinner';
+import { RISK_LEVELS, riskLevelLabel } from '../../constants/riskLevels';
 import {
   SENSOR_STATUSES,
   SENSOR_TYPES,
@@ -40,6 +39,7 @@ import { timeAgo } from '../../utils/formatters';
 const DEFAULT_FILTERS = { search: '', type: 'all', status: 'all' };
 const TYPE_OPTIONS = [{ value: 'all', label: 'All types' }, ...SENSOR_TYPES];
 const STATUS_OPTIONS = [{ value: 'all', label: 'All statuses' }, ...SENSOR_STATUSES];
+const POLL_INTERVAL_MS = 15000;
 
 const TREND_ICONS = {
   up: { Icon: ArrowUpRight, class: 'text-red-600 bg-red-50' },
@@ -47,12 +47,22 @@ const TREND_ICONS = {
   flat: { Icon: Minus, class: 'text-secondary-600 bg-secondary-100' },
 };
 
+const formatValue = (value) => {
+  if (value === null || value === undefined || value === '') return '—';
+  if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(2);
+  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  if (typeof value === 'object') return Array.isArray(value) ? `${value.length} items` : `${Object.keys(value).length} fields`;
+  return String(value);
+};
+
 /**
- * Advanced monitoring console: six telemetry charts (rain, tilt, soil
- * moisture, vibration, frequency, humidity) plus a searchable station
- * register with card and table views.
+ * Advanced monitoring console: a live node selector polls the hosted backend
+ * every 15 s and feeds REAL readings into the six telemetry charts (rain,
+ * tilt, soil moisture, vibration, humidity, temperature). Below it, the
+ * demo station register keeps its search, filters and card/table views.
  */
 export default function Monitoring() {
+  /* ---------------- station register (demo sensor set) ---------------- */
   const { data: sensors, isLoading, error, refetch } = useFetch(() => sensorService.getSensors(), []);
   const [search, setSearch] = useState(DEFAULT_FILTERS.search);
   const [type, setType] = useState(DEFAULT_FILTERS.type);
@@ -83,58 +93,220 @@ export default function Monitoring() {
     setStatus(DEFAULT_FILTERS.status);
   };
 
+  /* ---------------- live node console (real API) ---------------- */
+  const [nodes, setNodes] = useState([]);
+  const [nodesLoading, setNodesLoading] = useState(true);
+  const [nodesError, setNodesError] = useState(null);
+  const [nodeName, setNodeName] = useState('');
+  const [nodeData, setNodeData] = useState(null);
+  const [nodeLoading, setNodeLoading] = useState(false);
+  const [nodeError, setNodeError] = useState(null);
+  const [series, setSeries] = useState({});
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [nodesAttempt, setNodesAttempt] = useState(0);
+  const nodeNameRef = useRef(nodeName);
+  nodeNameRef.current = nodeName;
+
+  // Populate the node dropdown on mount (and on retry).
+  useEffect(() => {
+    let active = true;
+    setNodesLoading(true);
+    setNodesError(null);
+    getNodes()
+      .then((payload) => {
+        if (!active) return;
+        const names = toNodeNames(payload);
+        setNodes(names);
+        setNodeName((current) => current || names[0] || '');
+      })
+      .catch((fetchError) => {
+        if (active) setNodesError(fetchError?.message ?? 'Could not load the node list.');
+      })
+      .finally(() => {
+        if (active) setNodesLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [nodesAttempt]);
+
+  // One poll = fetch the node snapshot and append real readings to each series.
+  const pollNode = useCallback(async () => {
+    const selected = nodeNameRef.current;
+    if (!selected) return;
+    setNodeLoading(true);
+    try {
+      const payload = await getNodeByName(selected);
+      setNodeData(payload ?? null);
+      setNodeError(null);
+      setLastUpdated(new Date());
+      if (payload && typeof payload === 'object') {
+        const timestamp = new Date();
+        setSeries((current) => {
+          const next = { ...current };
+          for (const metric of LIVE_METRICS) {
+            const value = payload[metric.key];
+            if (typeof value === 'number' && Number.isFinite(value)) {
+              const points = [...(next[metric.key] ?? []), { t: timestamp, v: value }];
+              next[metric.key] = points.slice(-30);
+            }
+          }
+          return next;
+        });
+      }
+    } catch (pollError) {
+      setNodeError(pollError?.message ?? 'Could not load node data.');
+    } finally {
+      setNodeLoading(false);
+    }
+  }, []);
+
+  // New node selected: reset collected history and poll immediately.
+  useEffect(() => {
+    if (!nodeName) return undefined;
+    setSeries({});
+    setNodeData(null);
+    setNodeError(null);
+    setLastUpdated(null);
+    pollNode();
+    return undefined;
+  }, [nodeName, pollNode]);
+
+  // Poll again every 15 s so the charts accumulate real readings.
+  useEffect(() => {
+    if (!nodeName) return undefined;
+    const timer = setInterval(pollNode, POLL_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [nodeName, pollNode]);
+
+  const handlePollNow = () => pollNode();
+
+  const refreshedAt = lastUpdated
+    ? lastUpdated.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    : null;
+
   return (
     <div>
-      <div className="sm:flex sm:items-end sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Live Sensor Monitoring</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Telemetry console for rainfall, tilt, soil moisture, vibration, frequency and humidity —
-            sample data refreshed hourly.
-          </p>
-        </div>
-      </div>
+      <h1 className="text-2xl font-semibold tracking-tight">Live Sensor Monitoring</h1>
+      <p className="mt-1 text-sm text-muted-foreground">
+        Real node telemetry polled every 15 seconds, plus the demo station register with search,
+        filters and table view.
+      </p>
 
-      {/* Telemetry overview */}
-      <section aria-labelledby="telemetry-heading" className="mt-8">
+      {/* ---------------- live node console ---------------- */}
+      <section aria-labelledby="live-node-heading" className="mt-8">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <h2 id="telemetry-heading" className="text-lg font-bold text-[#0a2f5a]">
-            Telemetry — last 24 hours
+          <h2 id="live-node-heading" className="text-lg font-bold text-[#0a2f5a]">
+            Node telemetry — live backend
           </h2>
-          <Badge variant="warning">Sample data · hourly resolution</Badge>
+          <div className="flex items-center gap-2">
+            {nodeLoading && <Spinner size="sm" />}
+            <Badge variant="success">Live · polling every 15 s</Badge>
+          </div>
         </div>
-        <div className="mt-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-          {TELEMETRY.map((metric) => (
-            <TelemetryChart key={metric.key} {...metric} />
+
+        <div className="mt-4 rounded-xl border bg-white shadow-sm">
+          <div className="grid gap-4 px-5 py-4 sm:grid-cols-[1fr_auto] sm:items-end">
+            <div>
+              <label htmlFor="live-node-select" className="mb-1.5 block text-sm font-medium text-secondary-700">
+                Node
+              </label>
+              {nodesLoading ? (
+                <Skeleton className="h-10 w-full" />
+              ) : (
+                <select
+                  id="live-node-select"
+                  value={nodeName}
+                  onChange={(event) => setNodeName(event.target.value)}
+                  className="block h-10 w-full rounded-md border border-input bg-white px-3 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-ring"
+                >
+                  {nodes.length === 0 && <option value="">No nodes returned</option>}
+                  {nodes.map((name) => (
+                    <option key={name} value={name}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+            <div className="flex items-center gap-3 sm:justify-end">
+              <p className="text-xs text-secondary-500">
+                {refreshedAt ? `Last poll ${refreshedAt}` : 'Not polled yet'}
+              </p>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handlePollNow}
+                disabled={!nodeName || nodeLoading}
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${nodeLoading ? 'animate-spin' : ''}`} aria-hidden="true" />
+                Poll now
+              </Button>
+            </div>
+          </div>
+
+          {nodesError && (
+            <div className="px-5 pb-4">
+              <ErrorMessage
+                title="Node list unavailable"
+                message={nodesError}
+                onRetry={() => setNodesAttempt((attempt) => attempt + 1)}
+              />
+            </div>
+          )}
+        </div>
+
+        {/* six live charts */}
+        <div className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+          {LIVE_METRICS.map((metric) => (
+            <TelemetryChart
+              key={metric.key}
+              title={metric.title}
+              unit={metric.unit}
+              color={metric.color}
+              threshold={metric.threshold}
+              points={series[metric.key] ?? []}
+            />
           ))}
         </div>
+
+        {/* raw node fields */}
+        {nodeData && typeof nodeData === 'object' && (
+          <div className="mt-6">
+            <div className="mb-2 flex items-center gap-2 rounded-t-lg border-b-2 border-amber-400 bg-gradient-to-r from-[#0a2f5a] to-[#134b8a] px-4 py-2.5">
+              <p className="text-sm font-bold uppercase tracking-wider text-white">
+                Latest node response
+              </p>
+            </div>
+            <ul className="divide-y divide-secondary-100 overflow-hidden rounded-b-lg border">
+              {Object.entries(nodeData)
+                .filter(([, value]) => typeof value !== 'object' || value === null)
+                .map(([key, value]) => (
+                  <li
+                    key={key}
+                    className="flex items-center justify-between gap-4 px-4 py-2 text-sm odd:bg-white even:bg-secondary-50/60"
+                  >
+                    <span className="font-medium text-secondary-600">{key}</span>
+                    <span className="break-all text-right font-mono text-[13px] text-secondary-900">
+                      {formatValue(value)}
+                    </span>
+                  </li>
+                ))}
+            </ul>
+          </div>
+        )}
       </section>
 
-      {/* Live-API explorer — real backend endpoints, not the mock layer */}
-      <section aria-labelledby="live-api-heading" className="mt-12">
-        <h2 id="live-api-heading" className="text-lg font-bold text-[#0a2f5a]">
-          Station data explorer
-        </h2>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Pulls live station readings straight from the API — populate the dropdowns and inspect the
-          raw response.
-        </p>
-        <div className="mt-4">
-          <StationApiExplorer />
-        </div>
-      </section>
-
-      {/* Station register */}
+      {/* ---------------- demo station register ---------------- */}
       <section aria-labelledby="stations-heading" className="mt-12">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <h2 id="stations-heading" className="text-lg font-bold text-[#0a2f5a]">
-            Station register
-          </h2>
-          <div
-            role="group"
-            aria-label="Station view"
-            className="inline-flex overflow-hidden rounded-md border"
-          >
+          <div>
+            <h2 id="stations-heading" className="text-lg font-bold text-[#0a2f5a]">
+              Station register
+            </h2>
+            <p className="text-xs text-secondary-500">Demo sensor set — sample trends</p>
+          </div>
+          <div role="group" aria-label="Station view" className="inline-flex overflow-hidden rounded-md border">
             {[
               { key: 'cards', label: 'Cards', Icon: LayoutGrid },
               { key: 'table', label: 'Table', Icon: Table2 },
@@ -270,9 +442,7 @@ export default function Monitoring() {
                             {sensor.lastReading} {sensor.unit}
                           </td>
                           <td className="px-4 py-3">
-                            <span
-                              className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold ${Trend.class}`}
-                            >
+                            <span className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-semibold ${Trend.class}`}>
                               <Trend.Icon className="h-3.5 w-3.5" aria-hidden="true" />
                               {trend.direction === 'flat' ? 'steady' : `${trend.changePct}%`}
                             </span>
@@ -298,6 +468,15 @@ export default function Monitoring() {
           </>
         )}
       </section>
+    </div>
+  );
+}
+
+/** Inline panel header used for the raw node response list. */
+function PortalPanelLike({ title }) {
+  return (
+    <div className="mb-2 flex items-center gap-2 rounded-t-lg border-b-2 border-amber-400 bg-gradient-to-r from-[#0a2f5a] to-[#134b8a] px-4 py-2.5">
+      <p className="text-sm font-bold uppercase tracking-wider text-white">{title}</p>
     </div>
   );
 }

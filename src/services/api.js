@@ -81,7 +81,7 @@ export async function getStationData(stationId, dataType) {
 /* vite.config.js) because the backend does not send CORS headers yet.  */
 /* ------------------------------------------------------------------ */
 
-const NODES_API_BASE_URL = '/nodes-api';
+const NODES_API_BASE_URL = `${window.location.origin}/nodes-api`;
 
 /** GET /nodes/getAllNodes — returns an array of node objects. */
 export async function getNodes() {
@@ -103,6 +103,38 @@ export async function deleteNode(id) {
   return apiFetch(`${NODES_API_BASE_URL}/nodes/deleteNode/${encodeURIComponent(id)}`, {
     method: 'DELETE',
   });
+}
+
+/**
+ * POST /api/citizen-reports — submits a citizen landslide report as
+ * multipart/form-data (photo blob + report fields). Sent with raw fetch so
+ * the browser sets the multipart boundary; apiFetch would force JSON.
+ */
+export async function submitCitizenReport(formData) {
+  let response;
+  try {
+    response = await fetch(`${API_BASE_URL}/citizen-reports`, {
+      method: 'POST',
+      headers: { ...getAuthHeaders() },
+      body: formData,
+    });
+  } catch {
+    throw new ApiError('Unable to reach the server. Check your connection and try again.');
+  }
+
+  const contentType = response.headers.get('content-type') ?? '';
+  const payload = contentType.includes('application/json')
+    ? await response.json().catch(() => null)
+    : null;
+
+  if (!response.ok) {
+    throw new ApiError(
+      payload?.message ?? `Report failed with status ${response.status}.`,
+      response.status,
+      payload
+    );
+  }
+  return payload;
 }
 
 export { API_BASE_URL, USE_MOCKS };

@@ -66,11 +66,11 @@ export default function Landing() {
         <DistrictStatus />
         <InfrastructureMonitor />
         <WhoItsFor />
-        <ReportLandslide />
         <AlertSubscription />
         <SafetyInfo />
         <NoticesUpdates />
         <ReportsDocuments />
+        <ReportLandslide />
         <EmergencyContacts />
         <Faq />
       </main>
