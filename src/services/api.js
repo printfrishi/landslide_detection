@@ -1,7 +1,27 @@
 export const TOKEN_KEY = 'hr_token';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:5000/api';
+const API_BASE_URL =
+  import.meta.env.VITE_API_BASE_URL ??
+  'https://landslideearlywarning-system-backend.onrender.com';
+
 const USE_MOCKS = import.meta.env.VITE_USE_MOCKS === 'true';
+
+/**
+ * Base URL for the Nodes API.
+ *
+ * - In dev, we use the same-origin `/nodes-api` path so Vite's dev proxy
+ *   (see vite.config.js) forwards requests to the backend and avoids CORS.
+ * - In production, either:
+ *     (a) set VITE_NODES_API_BASE_URL to the backend URL directly (requires
+ *         the backend to send CORS headers), or
+ *     (b) keep it unset and add a rewrite on your host so `/nodes-api/*`
+ *         proxies to the backend.
+ */
+const NODES_API_BASE_URL =
+  import.meta.env.VITE_NODES_API_BASE_URL ??
+  (typeof window !== 'undefined'
+    ? `${window.location.origin}/nodes-api`
+    : 'https://landslideearlywarning-system-backend.onrender.com');
 
 /** Normalized API failure so components always handle errors the same way. */
 export class ApiError extends Error {
@@ -26,20 +46,29 @@ function getAuthHeaders() {
 
 /**
  * Fetch wrapper. Relative paths hit VITE_API_BASE_URL; absolute URLs (used by
- * the hosted node API via the /nodes-api proxy) pass through unchanged.
+ * the hosted node API) pass through unchanged.
  */
-export async function apiFetch(path, { method = 'GET', body, headers = {}, ...options } = {}) {
+export async function apiFetch(
+  path,
+  { method = 'GET', body, headers = {}, ...options } = {}
+) {
   const url = path.startsWith('http') ? path : `${API_BASE_URL}${path}`;
   let response;
   try {
     response = await fetch(url, {
       method,
-      headers: { 'Content-Type': 'application/json', ...getAuthHeaders(), ...headers },
+      headers: {
+        'Content-Type': 'application/json',
+        ...getAuthHeaders(),
+        ...headers,
+      },
       body: body !== undefined ? JSON.stringify(body) : undefined,
       ...options,
     });
   } catch {
-    throw new ApiError('Unable to reach the server. Check your connection and try again.');
+    throw new ApiError(
+      'Unable to reach the server. Check your connection and try again.'
+    );
   }
 
   const contentType = response.headers.get('content-type') ?? '';
@@ -58,7 +87,7 @@ export async function apiFetch(path, { method = 'GET', body, headers = {}, ...op
 }
 
 /* ------------------------------------------------------------------ */
-/* Station API — first endpoints migrated off the mock layer.           */
+/* Station API — first endpoints migrated off the mock layer.          */
 /* ------------------------------------------------------------------ */
 
 /** GET ${VITE_API_BASE_URL}/stations — list all monitoring stations. */
@@ -76,12 +105,12 @@ export async function getStationData(stationId, dataType) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Nodes API — hosted landslide early-warning backend.                  */
-/* Browser calls are proxied same-origin through /nodes-api (see        */
-/* vite.config.js) because the backend does not send CORS headers yet.  */
+/* Nodes API — hosted landslide early-warning backend.                 */
+/* Browser calls go through NODES_API_BASE_URL. In dev this is         */
+/* /nodes-api, forwarded by Vite's proxy (vite.config.js). Override    */
+/* with VITE_NODES_API_BASE_URL in production if the backend sends     */
+/* CORS headers, or add a host rewrite for /nodes-api/*.               */
 /* ------------------------------------------------------------------ */
-
-const NODES_API_BASE_URL = `${window.location.origin}/nodes-api`;
 
 /** GET /nodes/getAllNodes — returns an array of node objects. */
 export async function getNodes() {
@@ -90,19 +119,25 @@ export async function getNodes() {
 
 /** GET /nodes/getbyName/:name — full telemetry for one node. */
 export async function getNodeByName(name) {
-  return apiFetch(`${NODES_API_BASE_URL}/nodes/getbyName/${encodeURIComponent(name)}`);
+  return apiFetch(
+    `${NODES_API_BASE_URL}/nodes/getbyName/${encodeURIComponent(name)}`
+  );
 }
 
 /** POST /nodes/addNode — register a new node. */
 export async function addNode(data) {
-  return apiFetch(`${NODES_API_BASE_URL}/nodes/addNode`, { method: 'POST', body: data });
+  return apiFetch(`${NODES_API_BASE_URL}/nodes/addNode`, {
+    method: 'POST',
+    body: data,
+  });
 }
 
 /** DELETE /nodes/deleteNode/:id — remove a node by id. */
 export async function deleteNode(id) {
-  return apiFetch(`${NODES_API_BASE_URL}/nodes/deleteNode/${encodeURIComponent(id)}`, {
-    method: 'DELETE',
-  });
+  return apiFetch(
+    `${NODES_API_BASE_URL}/nodes/deleteNode/${encodeURIComponent(id)}`,
+    { method: 'DELETE' }
+  );
 }
 
 /**
@@ -119,7 +154,9 @@ export async function submitCitizenReport(formData) {
       body: formData,
     });
   } catch {
-    throw new ApiError('Unable to reach the server. Check your connection and try again.');
+    throw new ApiError(
+      'Unable to reach the server. Check your connection and try again.'
+    );
   }
 
   const contentType = response.headers.get('content-type') ?? '';
@@ -137,4 +174,4 @@ export async function submitCitizenReport(formData) {
   return payload;
 }
 
-export { API_BASE_URL, USE_MOCKS };
+export { API_BASE_URL, NODES_API_BASE_URL, USE_MOCKS };
