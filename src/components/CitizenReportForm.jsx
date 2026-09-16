@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   Camera,
   CameraOff,
   CheckCircle2,
@@ -7,6 +8,7 @@ import {
   MapPin,
   Send,
   ShieldCheck,
+  X,
 } from 'lucide-react';
 import { Button } from './ui/Button';
 import { DISTRICTS } from '../pages/Landing/sections/DemoData';
@@ -17,27 +19,14 @@ const REPORT_ENDPOINT = `${API_BASE_URL}/landslide-report/makeReport`;
 const inputClasses =
   'mt-1.5 block w-full rounded-md border border-input bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-ring disabled:cursor-not-allowed disabled:bg-secondary-100 disabled:text-secondary-500';
 
-/**
- * Citizen landslide report form.
- *
- * - Asks for location + back-camera permission (via the browser prompt)
- *   only when the user clicks the respective buttons.
- * - Captures a live frame from the rear camera and releases the stream.
- * - POSTs multipart/form-data to /landslide-report/makeReport with:
- *     mobileNo, description, latitude, longitude, image
- * - The backend runs an AI model on the image; only verified reports are
- *   stored. Response: { message: "..." }
- */
 export default function CitizenReportForm() {
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const photoRef = useRef(null);
 
-  /* reporter identity */
   const [reporterName, setReporterName] = useState('');
   const [reporterMobile, setReporterMobile] = useState('');
 
-  /* location */
   const [location, setLocation] = useState({
     lat: null,
     lon: null,
@@ -47,14 +36,11 @@ export default function CitizenReportForm() {
     requested: false,
   });
 
-  /* camera */
-  const [cameraState, setCameraState] = useState('off'); // off | starting | live | error
+  const [cameraState, setCameraState] = useState('off');
   const [cameraError, setCameraError] = useState('');
 
-  /* photo */
-  const [photo, setPhoto] = useState(null); // { blob, url }
+  const [photo, setPhoto] = useState(null);
 
-  /* form */
   const [hazardType, setHazardType] = useState('Landslide');
   const [district, setDistrict] = useState('Tehri Garhwal');
   const [description, setDescription] = useState('');
@@ -65,17 +51,47 @@ export default function CitizenReportForm() {
   const [submitError, setSubmitError] = useState(null);
   const [successMessage, setSuccessMessage] = useState(null);
 
-  /* -------------------- cleanup -------------------- */
+  const stopCamera = useCallback(() => {
+    const video = videoRef.current;
+
+    if (video) {
+      try { video.pause(); } catch {}
+      try { video.srcObject = null; } catch {}
+      try {
+        video.removeAttribute('src');
+        video.load();
+      } catch {}
+    }
+
+    const stream = streamRef.current;
+    if (stream) {
+      stream.getTracks().forEach((track) => {
+        try { track.stop(); } catch {}
+      });
+      streamRef.current = null;
+    }
+
+    setCameraState('off');
+  }, []);
+
   useEffect(
     () => () => {
-      streamRef.current?.getTracks().forEach((t) => t.stop());
-      streamRef.current = null;
+      stopCamera();
       if (photoRef.current) URL.revokeObjectURL(photoRef.current);
     },
-    []
+    [stopCamera]
   );
 
-  /* -------------------- location -------------------- */
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.hidden && cameraState === 'live') {
+        stopCamera();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => document.removeEventListener('visibilitychange', handleVisibility);
+  }, [cameraState, stopCamera]);
+
   const requestLocation = useCallback(() => {
     if (!navigator.geolocation) {
       setLocation((c) => ({
@@ -94,7 +110,6 @@ export default function CitizenReportForm() {
         const { latitude, longitude } = position.coords;
         setLocation((c) => ({ ...c, lat: latitude, lon: longitude, loading: false }));
 
-        // Reverse geocode for a human-readable address (best-effort).
         fetch(
           `https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}&zoom=16`
         )
@@ -118,13 +133,6 @@ export default function CitizenReportForm() {
     );
   }, []);
 
-  /* -------------------- camera -------------------- */
-  const stopCamera = useCallback(() => {
-    streamRef.current?.getTracks().forEach((t) => t.stop());
-    streamRef.current = null;
-    setCameraState('off');
-  }, []);
-
   const startCamera = useCallback(() => {
     setCameraState('starting');
     setCameraError('');
@@ -139,7 +147,6 @@ export default function CitizenReportForm() {
 
     navigator.mediaDevices
       .getUserMedia({
-        // Force the rear camera — falls back gracefully if the device only has one.
         video: {
           facingMode: { ideal: 'environment' },
           width: { ideal: 1280 },
@@ -163,7 +170,6 @@ export default function CitizenReportForm() {
       });
   }, []);
 
-  /* attach stream after <video> mounts */
   useEffect(() => {
     const video = videoRef.current;
     if (
@@ -177,7 +183,6 @@ export default function CitizenReportForm() {
     }
   }, [cameraState]);
 
-  /* capture a frame and return the JPEG blob */
   const captureFrame = () =>
     new Promise((resolve) => {
       const video = videoRef.current;
@@ -210,17 +215,19 @@ export default function CitizenReportForm() {
     if (cameraState === 'live') {
       const blob = await captureFrame();
       stopCamera();
-      if (!blob) setSubmitError('Could not capture a frame — is the camera feed running?');
+      if (!blob)
+        setSubmitError({
+          title: 'Capture failed',
+          message: 'Could not capture a frame — is the camera feed running?',
+        });
       return;
     }
     if (cameraState === 'off' || cameraState === 'error') startCamera();
   };
 
-  /* -------------------- submit -------------------- */
   const handleSubmit = async (event) => {
     event.preventDefault();
 
-    // validations
     const errs = {
       name: reporterName.trim().length >= 2 ? null : 'Please enter your name.',
       mobile:
@@ -239,7 +246,10 @@ export default function CitizenReportForm() {
     if (errs.name || errs.mobile || errs.description) return;
 
     if (location.lat === null || location.lon === null) {
-      setSubmitError('Location is required. Tap “Detect location” and allow access.');
+      setSubmitError({
+        title: 'Location required',
+        message: 'Tap "Detect my location" and allow access before submitting.',
+      });
       return;
     }
 
@@ -247,7 +257,6 @@ export default function CitizenReportForm() {
     setSubmitError(null);
 
     try {
-      // If the camera is still live, grab a fresh frame and shut it down.
       let blob = null;
       if (cameraState === 'live') {
         blob = await captureFrame();
@@ -255,18 +264,25 @@ export default function CitizenReportForm() {
       }
       if (!blob) blob = photo?.blob ?? null;
 
-      // Build multipart form-data with the exact fields the backend expects.
+      if (!blob) {
+        setSubmitError({
+          title: 'Photo required',
+          message: 'Capture a live photo from the rear camera before submitting.',
+        });
+        return;
+      }
+
       const formData = new FormData();
+      formData.append('name', reporterName.trim());
       formData.append('mobileNo', reporterMobile.trim());
       formData.append('description', description.trim());
       formData.append('latitude', String(location.lat));
       formData.append('longitude', String(location.lon));
-      if (blob) formData.append('image', blob, 'report-photo.jpg');
+      formData.append('image', blob, 'report-photo.jpg');
 
       const res = await fetch(REPORT_ENDPOINT, {
         method: 'POST',
         body: formData,
-        // do NOT set Content-Type — the browser sets the multipart boundary
       });
 
       const contentType = res.headers.get('content-type') ?? '';
@@ -275,28 +291,58 @@ export default function CitizenReportForm() {
         : null;
 
       if (!res.ok) {
-        throw new Error(
-          payload?.message ?? `Submission failed with status ${res.status}.`
-        );
+        const backendMessage =
+          payload?.error ??
+          payload?.message ??
+          payload?.detail ??
+          `Submission failed (HTTP ${res.status}).`;
+
+        const isAiRejection =
+          res.status === 400 &&
+          typeof backendMessage === 'string' &&
+          /reject|not detect|confidence|landslide/i.test(backendMessage);
+
+        setSubmitError({
+          title: isAiRejection ? 'Photo could not be verified' : 'Submission failed',
+          message: backendMessage,
+          status: res.status,
+        });
+        return;
       }
 
       setSuccessMessage(
         payload?.message ?? 'Landslide report submitted successfully.'
       );
     } catch (err) {
-      setSubmitError(err?.message ?? 'Could not submit the report. Please try again.');
+      setSubmitError({
+        title: 'Network error',
+        message:
+          err?.message ??
+          'Could not reach the server. Check your connection and try again.',
+      });
     } finally {
       setSubmitting(false);
     }
   };
 
-  /* -------------------- success screen -------------------- */
   if (successMessage) {
+    const match = successMessage.match(/Report ID:\s*(\d+)/i);
+    const reportId = match?.[1];
+
     return (
       <div className="rounded-xl border bg-white p-8 text-center shadow-sm" role="status">
         <CheckCircle2 className="mx-auto h-12 w-12 text-emerald-600" aria-hidden="true" />
         <h3 className="mt-4 text-xl font-bold text-[#0a2f5a]">Report submitted</h3>
-        <p className="mt-2 text-sm text-secondary-600">{successMessage}</p>
+
+        {reportId && (
+          <p className="mt-3 inline-flex items-center gap-2 rounded-full bg-emerald-50 px-4 py-1.5 text-sm font-semibold text-emerald-800">
+            Reference&nbsp;
+            <span className="font-mono">#{reportId}</span>
+          </p>
+        )}
+
+        <p className="mt-4 text-sm text-secondary-600">{successMessage}</p>
+
         <button
           type="button"
           onClick={() => {
@@ -330,14 +376,12 @@ export default function CitizenReportForm() {
           ? 'Retake photo'
           : 'Open rear camera';
 
-  /* -------------------- form -------------------- */
   return (
     <form
       onSubmit={handleSubmit}
       noValidate
       className="overflow-hidden rounded-2xl border bg-white shadow-sm"
     >
-      {/* header */}
       <div className="flex items-center gap-3 border-b bg-gradient-to-r from-[#0a2f5a] to-[#134b8a] px-6 py-4">
         <ShieldCheck className="h-6 w-6 text-amber-300" aria-hidden="true" />
         <div>
@@ -350,14 +394,12 @@ export default function CitizenReportForm() {
         </div>
       </div>
 
-      {/* instructions */}
       <div className="border-b bg-sky-50 px-6 py-3 text-sm text-sky-900">
         📸 Rear camera only. 📍 Location is required. The camera opens only when you tap
         the button below — nothing is captured automatically.
       </div>
 
       <div className="grid gap-6 p-6 lg:grid-cols-2">
-        {/* -------- left column: camera -------- */}
         <div>
           <p className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-secondary-700">
             <Camera className="h-4 w-4" aria-hidden="true" />
@@ -386,7 +428,7 @@ export default function CitizenReportForm() {
               <div className="flex h-full flex-col items-center justify-center gap-2 px-4 text-center text-white/70">
                 <CameraOff className="h-7 w-7" aria-hidden="true" />
                 <p className="text-xs leading-5">
-                  Camera is off. Tap “{cameraButtonLabel}” to open the rear camera.
+                  Camera is off. Tap "{cameraButtonLabel}" to open the rear camera.
                 </p>
               </div>
             )}
@@ -448,7 +490,6 @@ export default function CitizenReportForm() {
           )}
         </div>
 
-        {/* -------- right column: location + reporter -------- */}
         <div className="space-y-5">
           <div>
             <p className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-secondary-700">
@@ -542,7 +583,6 @@ export default function CitizenReportForm() {
         </div>
       </div>
 
-      {/* -------- bottom: hazard + description -------- */}
       <div className="grid gap-4 border-t px-6 py-5 sm:grid-cols-2">
         <div>
           <label htmlFor="cr-hazard" className="mb-1.5 block text-sm font-medium text-secondary-700">
@@ -603,14 +643,40 @@ export default function CitizenReportForm() {
         </div>
       </div>
 
-      {/* error + submit */}
       <div className="border-t bg-secondary-50/60 px-6 py-4">
         {submitError && (
           <div
-            className="mb-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800"
             role="alert"
+            className={`mb-4 flex items-start gap-3 rounded-lg border px-4 py-3 text-sm ${
+              submitError.status === 400
+                ? 'border-amber-300 bg-amber-50 text-amber-900'
+                : 'border-red-200 bg-red-50 text-red-800'
+            }`}
           >
-            {submitError}
+            <span
+              className={`mt-0.5 inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full ${
+                submitError.status === 400 ? 'bg-amber-500' : 'bg-red-500'
+              }`}
+              aria-hidden="true"
+            >
+              {submitError.status === 400 ? (
+                <AlertTriangle className="h-3 w-3 text-white" />
+              ) : (
+                <X className="h-3 w-3 text-white" />
+              )}
+            </span>
+            <div className="flex-1">
+              <p className="font-semibold">{submitError.title}</p>
+              <p className="mt-0.5 text-xs leading-5">{submitError.message}</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSubmitError(null)}
+              className="ml-2 text-lg leading-none opacity-60 transition-opacity hover:opacity-100"
+              aria-label="Dismiss error"
+            >
+              ×
+            </button>
           </div>
         )}
 

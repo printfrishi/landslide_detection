@@ -1,160 +1,159 @@
 import { useEffect, useMemo, useState } from 'react';
-import { BellOff } from 'lucide-react';
-import useFetch from '../../hooks/useFetch';
-import { useToast } from '../../context/ToastContext';
-import alertService from '../../services/alertService';
-import AlertCard from '../../components/features/alerts/AlertCard';
-import AlertDetailModal from '../../components/features/alerts/AlertDetailModal';
-import { SelectField } from '../../components/ui/Select';
+import { BellOff, ExternalLink, Loader2, MapPin, Phone, Search, User, X } from 'lucide-react';
+import { Input } from '../../components/ui/Input';
 import { Button } from '../../components/ui/Button';
 import { Skeleton } from '../../components/ui/Skeleton';
 import EmptyState from '../../components/ui/EmptyState';
 import ErrorMessage from '../../components/ui/ErrorMessage';
-import ConfirmDialog from '../../components/ui/ConfirmDialog';
-import { RISK_LEVELS, RISK_LEVEL_KEYS, riskLevelLabel } from '../../constants/riskLevels';
 
-const DEFAULT_FILTERS = { risk: 'all', status: 'all' };
+const API_BASE_URL = 'https://landslideearlywarning-system-backend.onrender.com';
+const REPORTS_ENDPOINT = `${API_BASE_URL}/landslide-report/getAllReports`;
 
-const RISK_OPTIONS = [
-  { value: 'all', label: 'All risk levels' },
-  ...RISK_LEVEL_KEYS.map((level) => ({ value: level, label: riskLevelLabel(level) })),
-];
+const buildMapsUrl = (lat, lon) =>
+  `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(lat)},${encodeURIComponent(lon)}`;
 
-const ACK_OPTIONS = [
-  { value: 'all', label: 'All alerts' },
-  { value: 'unacknowledged', label: 'Unacknowledged' },
-  { value: 'acknowledged', label: 'Acknowledged' },
-];
+const isValidNumber = (v) => typeof v === 'number' && Number.isFinite(v);
+
+const formatCoords = (lat, lon) => {
+  if (!isValidNumber(lat) || !isValidNumber(lon)) return null;
+  return `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
+};
 
 /**
- * Alert feed with risk/acknowledgement filters, a detail modal, and an
- * acknowledge flow guarded by ConfirmDialog.
+ * Citizen landslide reports feed.
+ *
+ * Pulls /landslide-report/getAllReports and renders every report as a card
+ * with a full detail modal and a "See on map" button that opens Google Maps
+ * at the report's exact coordinates.
  */
 export default function Alerts() {
-  const toast = useToast();
-  const { data: alerts, isLoading, error, refetch } = useFetch(() => alertService.getAlerts(), []);
+  const [reports, setReports] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [search, setSearch] = useState('');
+  const [selectedReport, setSelectedReport] = useState(null);
+  const [attempt, setAttempt] = useState(0);
 
-  // Keep a local copy so acknowledging updates the feed instantly.
-  const [localAlerts, setLocalAlerts] = useState(null);
   useEffect(() => {
-    if (alerts) setLocalAlerts(alerts);
-  }, [alerts]);
+    let active = true;
+    setLoading(true);
+    setError(null);
 
-  const [riskFilter, setRiskFilter] = useState(DEFAULT_FILTERS.risk);
-  const [statusFilter, setStatusFilter] = useState(DEFAULT_FILTERS.status);
-  const [detailAlert, setDetailAlert] = useState(null);
-  const [confirmAlert, setConfirmAlert] = useState(null);
-  const [acknowledging, setAcknowledging] = useState(false);
+    fetch(REPORTS_ENDPOINT)
+      .then(async (res) => {
+        const contentType = res.headers.get('content-type') ?? '';
+        const payload = contentType.includes('application/json')
+          ? await res.json().catch(() => null)
+          : null;
 
-  const visibleAlerts = localAlerts ?? alerts ?? [];
+        if (!res.ok) {
+          throw new Error(
+            payload?.error ??
+              payload?.message ??
+              `Failed to load reports (HTTP ${res.status}).`
+          );
+        }
+        return Array.isArray(payload) ? payload : [];
+      })
+      .then((data) => {
+        if (!active) return;
+        setReports(data);
+      })
+      .catch((err) => {
+        if (active) setError(err?.message ?? 'Could not load reports.');
+      })
+      .finally(() => {
+        if (active) setLoading(false);
+      });
 
-  const filtered = useMemo(
-    () =>
-      visibleAlerts.filter((alert) => {
-        const matchesRisk = riskFilter === 'all' || alert.riskLevel === riskFilter;
-        const matchesStatus =
-          statusFilter === 'all' ||
-          (statusFilter === 'unacknowledged' && !alert.acknowledged) ||
-          (statusFilter === 'acknowledged' && alert.acknowledged);
-        return matchesRisk && matchesStatus;
-      }),
-    [visibleAlerts, riskFilter, statusFilter]
-  );
+    return () => {
+      active = false;
+    };
+  }, [attempt]);
 
-  const filtersActive = riskFilter !== DEFAULT_FILTERS.risk || statusFilter !== DEFAULT_FILTERS.status;
-  const unacknowledgedCount = visibleAlerts.filter((alert) => !alert.acknowledged).length;
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return reports;
+    return reports.filter((r) => {
+      const haystack = [
+        r.name,
+        r.mobileNo,
+        r.Description,
+        r.description,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [reports, search]);
 
-  const clearFilters = () => {
-    setRiskFilter(DEFAULT_FILTERS.risk);
-    setStatusFilter(DEFAULT_FILTERS.status);
-  };
-
-  const requestAcknowledge = (alert) => {
-    setDetailAlert(null);
-    setConfirmAlert(alert);
-  };
-
-  const confirmAcknowledge = async () => {
-    if (!confirmAlert) return;
-    setAcknowledging(true);
-    try {
-      const updated = await alertService.acknowledgeAlert(confirmAlert.id);
-      setLocalAlerts((current) =>
-        (current ?? []).map((alert) => (alert.id === updated.id ? updated : alert))
-      );
-      setConfirmAlert(null);
-      toast.success('Alert acknowledged');
-    } catch (ackError) {
-      toast.error(ackError?.message ?? 'Could not acknowledge the alert. Please try again.');
-    } finally {
-      setAcknowledging(false);
-    }
-  };
+  const total = reports.length;
+  const withPhoto = reports.filter((r) => r.imageUrl).length;
 
   return (
     <div>
-      <h1 className="text-2xl font-semibold tracking-tight">Alerts</h1>
+      <h1 className="text-2xl font-semibold tracking-tight">Citizen Landslide Reports</h1>
       <p className="mt-1 text-sm text-muted-foreground" role="status">
-        {unacknowledgedCount} unacknowledged alert{unacknowledgedCount === 1 ? '' : 's'} across all
-        zones.
+        {loading
+          ? 'Loading reports…'
+          : `${total} report${total === 1 ? '' : 's'} · ${withPhoto} with photo`}
       </p>
 
-      {/* Filter bar */}
-      <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:items-end">
-        <SelectField
-          label="Risk level"
-          value={riskFilter}
-          onValueChange={setRiskFilter}
-          options={RISK_OPTIONS}
-          className="sm:w-44"
-        />
-        <SelectField
-          label="Status"
-          value={statusFilter}
-          onValueChange={setStatusFilter}
-          options={ACK_OPTIONS}
-          className="sm:w-44"
-        />
+      <div className="mt-6 max-w-md">
+        <div className="relative">
+          <Search
+            className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
+            aria-hidden="true"
+          />
+          <Input
+            name="search"
+            type="search"
+            placeholder="Search by name, phone, or description…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            inputClassName="pl-9"
+            aria-label="Search reports"
+          />
+        </div>
       </div>
 
-      {/* Feed */}
-      {isLoading ? (
+      {loading ? (
         <div className="mt-6 space-y-4" aria-hidden="true">
-          {[0, 1, 2].map((index) => (
-            <div key={index} className="rounded-xl border bg-card shadow-sm">
-              <div className="space-y-3 p-6">
-                <div className="flex items-center gap-2">
-                  <Skeleton className="h-5 w-16 rounded-md" />
-                  <Skeleton className="h-3 w-24" />
-                  <Skeleton className="h-3 w-16" />
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="rounded-xl border bg-white shadow-sm">
+              <div className="flex gap-4 p-5">
+                <Skeleton className="h-28 w-28 shrink-0 rounded-lg" />
+                <div className="flex-1 space-y-3">
+                  <Skeleton className="h-4 w-1/3" />
+                  <Skeleton className="h-3 w-1/2" />
+                  <Skeleton className="h-3 w-3/4" />
+                  <Skeleton className="h-8 w-32 rounded-md" />
                 </div>
-                <Skeleton className="h-5 w-2/3" />
-                <Skeleton className="h-4 w-full" />
-                <Skeleton className="h-4 w-1/2" />
               </div>
             </div>
           ))}
         </div>
       ) : error ? (
         <ErrorMessage
-          title="Could not load alerts"
-          message="The alert service did not respond. Try again in a moment."
-          onRetry={refetch}
+          title="Could not load reports"
+          message={error}
+          onRetry={() => setAttempt((a) => a + 1)}
           className="mt-6"
         />
       ) : filtered.length === 0 ? (
         <EmptyState
           icon={BellOff}
-          title={filtersActive ? 'No alerts match your filters' : 'No alerts yet'}
+          title={search ? 'No reports match your search' : 'No reports yet'}
           description={
-            filtersActive
-              ? 'Try different filters or clear them to see every alert.'
-              : 'All zones are currently calm. New warnings will appear here as sensors raise them.'
+            search
+              ? 'Try a different keyword or clear the search box.'
+              : 'When citizens submit landslide reports, they will appear here.'
           }
           action={
-            filtersActive ? (
-              <Button variant="outline" onClick={clearFilters}>
-                Clear filters
+            search ? (
+              <Button variant="outline" onClick={() => setSearch('')}>
+                Clear search
               </Button>
             ) : null
           }
@@ -162,31 +161,235 @@ export default function Alerts() {
         />
       ) : (
         <div className="mt-6 space-y-4">
-          {filtered.map((alert) => (
-            <AlertCard
-              key={alert.id}
-              alert={alert}
-              onView={setDetailAlert}
-              onAcknowledge={requestAcknowledge}
+          {filtered.map((report) => (
+            <ReportCard
+              key={report.id}
+              report={report}
+              onOpen={() => setSelectedReport(report)}
             />
           ))}
         </div>
       )}
 
-      <AlertDetailModal
-        alert={detailAlert}
-        onClose={() => setDetailAlert(null)}
-        onAcknowledge={requestAcknowledge}
-      />
-      <ConfirmDialog
-        isOpen={Boolean(confirmAlert)}
-        onClose={() => setConfirmAlert(null)}
-        onConfirm={confirmAcknowledge}
-        title="Acknowledge alert?"
-        message={`You are acknowledging "${confirmAlert?.title ?? ''}" in ${confirmAlert?.zone ?? ''}. This signals to the team that the warning has been seen and handled.`}
-        confirmLabel="Acknowledge"
-        loading={acknowledging}
-      />
+      {selectedReport && (
+        <ReportDetailModal
+          report={selectedReport}
+          onClose={() => setSelectedReport(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Card                                                                */
+/* ------------------------------------------------------------------ */
+
+function ReportCard({ report, onOpen }) {
+  const description = report.Description ?? report.description ?? 'No description provided.';
+  const coords = formatCoords(report.latitude, report.longitude);
+  const mapsUrl = coords ? buildMapsUrl(report.latitude, report.longitude) : null;
+
+  return (
+    <article className="overflow-hidden rounded-xl border bg-white shadow-sm transition-shadow hover:shadow-md">
+      <div className="flex flex-col gap-4 p-5 sm:flex-row">
+        <div className="h-40 w-full shrink-0 overflow-hidden rounded-lg border bg-secondary-100 sm:h-32 sm:w-40">
+          {report.imageUrl ? (
+            <img
+              src={report.imageUrl}
+              alt={`Report ${report.id}`}
+              className="h-full w-full object-cover"
+              loading="lazy"
+            />
+          ) : (
+            <div className="flex h-full items-center justify-center text-xs text-secondary-400">
+              No photo
+            </div>
+          )}
+        </div>
+
+        <div className="flex flex-1 flex-col">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wider text-secondary-500">
+                Report #{report.id}
+              </p>
+              <h3 className="mt-0.5 text-base font-bold text-[#0a2f5a]">
+                {report.name?.trim() || 'Anonymous reporter'}
+              </h3>
+            </div>
+          </div>
+
+          <p className="mt-2 line-clamp-2 text-sm text-secondary-700">{description}</p>
+
+          <dl className="mt-3 grid grid-cols-1 gap-x-4 gap-y-1 text-xs text-secondary-600 sm:grid-cols-2">
+            <div className="flex items-center gap-1.5">
+              <Phone className="h-3.5 w-3.5" aria-hidden="true" />
+              <span className="font-mono">{report.mobileNo ?? '—'}</span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <MapPin className="h-3.5 w-3.5" aria-hidden="true" />
+              <span className="font-mono">{coords ?? 'No coordinates'}</span>
+            </div>
+          </dl>
+
+          <div className="mt-4 flex flex-wrap gap-2">
+            <Button size="sm" variant="outline" onClick={onOpen}>
+              View details
+            </Button>
+            {mapsUrl && (
+              <a
+                href={mapsUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex items-center gap-1.5 rounded-md bg-[#0a2f5a] px-3 py-2 text-sm font-semibold text-white transition-colors hover:bg-[#134b8a] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                <MapPin className="h-4 w-4" aria-hidden="true" />
+                See on map
+                <ExternalLink className="h-3 w-3 opacity-70" aria-hidden="true" />
+              </a>
+            )}
+          </div>
+        </div>
+      </div>
+    </article>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Detail modal                                                        */
+/* ------------------------------------------------------------------ */
+
+function ReportDetailModal({ report, onClose }) {
+  const description = report.Description ?? report.description ?? 'No description provided.';
+  const coords = formatCoords(report.latitude, report.longitude);
+  const mapsUrl = coords ? buildMapsUrl(report.latitude, report.longitude) : null;
+
+  useEffect(() => {
+    const handleKey = (e) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', handleKey);
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.removeEventListener('keydown', handleKey);
+      document.body.style.overflow = '';
+    };
+  }, [onClose]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="report-detail-title"
+      onClick={onClose}
+    >
+      <div
+        className="relative max-h-[92vh] w-full max-w-3xl overflow-y-auto rounded-2xl bg-white shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b bg-gradient-to-r from-[#0a2f5a] to-[#134b8a] px-6 py-4">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-wider text-amber-300">
+              Report #{report.id}
+            </p>
+            <h2 id="report-detail-title" className="text-lg font-bold text-white">
+              {report.name?.trim() || 'Anonymous reporter'}
+            </h2>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-full p-1.5 text-white/80 transition-colors hover:bg-white/10 hover:text-white"
+            aria-label="Close"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <div className="grid gap-6 p-6 sm:grid-cols-2">
+          <div>
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-secondary-500">
+              Photo
+            </p>
+            <div className="overflow-hidden rounded-lg border bg-secondary-100">
+              {report.imageUrl ? (
+                <img
+                  src={report.imageUrl}
+                  alt={`Report ${report.id}`}
+                  className="h-auto w-full object-contain"
+                />
+              ) : (
+                <div className="flex h-48 items-center justify-center text-sm text-secondary-400">
+                  No photo attached
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            <div>
+              <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-secondary-500">
+                Reporter
+              </p>
+              <div className="rounded-lg border bg-secondary-50/60 p-3 space-y-2 text-sm">
+                <div className="flex items-center gap-2 text-secondary-700">
+                  <User className="h-4 w-4 text-secondary-500" aria-hidden="true" />
+                  <span className="font-semibold">
+                    {report.name?.trim() || 'Anonymous'}
+                  </span>
+                </div>
+                <div className="flex items-center gap-2 text-secondary-700">
+                  <Phone className="h-4 w-4 text-secondary-500" aria-hidden="true" />
+                  <a href={`tel:${report.mobileNo}`} className="font-mono hover:underline">
+                    {report.mobileNo ?? '—'}
+                  </a>
+                </div>
+              </div>
+            </div>
+
+            <div>
+              <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-secondary-500">
+                Location
+              </p>
+              <div className="rounded-lg border bg-secondary-50/60 p-3 space-y-2 text-sm">
+                <div className="flex items-start gap-2 text-secondary-700">
+                  <MapPin className="mt-0.5 h-4 w-4 shrink-0 text-secondary-500" aria-hidden="true" />
+                  <span className="font-mono">{coords ?? 'No coordinates'}</span>
+                </div>
+                {mapsUrl && (
+                  <a
+                    href={mapsUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="inline-flex items-center gap-1.5 rounded-md bg-[#0a2f5a] px-3 py-2 text-xs font-semibold text-white transition-colors hover:bg-[#134b8a]"
+                  >
+                    <MapPin className="h-3.5 w-3.5" aria-hidden="true" />
+                    Open in Google Maps
+                    <ExternalLink className="h-3 w-3 opacity-70" aria-hidden="true" />
+                  </a>
+                )}
+              </div>
+            </div>
+          </div>
+
+          <div className="sm:col-span-2">
+            <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-secondary-500">
+              Description
+            </p>
+            <div className="rounded-lg border bg-white p-4 text-sm leading-6 text-secondary-800">
+              {description}
+            </div>
+          </div>
+        </div>
+
+        <div className="flex justify-end gap-2 border-t bg-secondary-50/60 px-6 py-4">
+          <Button variant="outline" onClick={onClose}>
+            Close
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }
